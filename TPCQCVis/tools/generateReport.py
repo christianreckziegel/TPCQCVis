@@ -29,15 +29,15 @@ def replace_in_ipynb(file_path, temp, patterns, replacements):
     with open(temp, "w") as file:
         json.dump(notebook, file)
 
-def createRunReport(runNumber, period, apass, path, template_path, dir):
+def createRunReport(runNumber, period, apass, path, template_path, dir, n_gaussians):
     # Create a temporary file with a unique filename for the run report
     with tempfile.NamedTemporaryFile(prefix="TPCQC_", suffix=".ipynb", delete=False) as temp_run:
         temp_run_path = temp_run.name
 
     print(" → Creating run report:", period, apass, runNumber)
     replace_in_ipynb(template_path, temp_run_path,
-        ["myPeriod", "myPass", "123456", "myPath"],
-        [period, apass, runNumber, path]
+        ["myPeriod", "myPass", "123456", "myPath", "numGaussians"],
+        [period, apass, runNumber, path, str(args.n_gaussians)]
     )
     # The command and its arguments for the run report
     run_report_command = [
@@ -128,6 +128,7 @@ if __name__ == "__main__":
     parser.add_argument("--only_comparison", action="store_true", help="Generate only comparison report")
     parser.add_argument("--rerun", action="store_true", help="Recreate run reports for all runs")
     parser.add_argument("-t", "--num_threads", type=int, default=1, help="Number of threads to be used (default: 1)")
+    parser.add_argument("--n_gaussians", type=int, choices=[2, 3, 4], default=2, help="Number of Gaussians to use in the pion-electrion separation power fit (default: 2, triple: 3, double+exponential: 4)")
     args = parser.parse_args()
 
     run_template_path = f"{CODEDIR}/TPCQCVis/reports/TPC_AQC_Template_Run.ipynb"
@@ -160,7 +161,7 @@ if __name__ == "__main__":
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.num_threads) as executor:
             futures = []
             for runNumber in runList_selected:
-                futures.append(executor.submit(createRunReport, runNumber, args.period, args.apass, args.path, run_template_path, fullpath))
+                futures.append(executor.submit(createRunReport, runNumber, args.period, args.apass, args.path, run_template_path, fullpath, args.n_gaussians))
             concurrent.futures.wait(futures)
 
         if len(runList) > 1:
