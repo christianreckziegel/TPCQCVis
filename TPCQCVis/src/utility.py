@@ -173,10 +173,27 @@ def getPIDProfiles(qcFile,charge="pos",debug=False, rebin=1):
         h.Scale(0)
         h.SetName(particleList[i])
     
-    for b in range(len(hypothesis)):
-        pid = hypothesis[b]
-        if 0 < pid <= nSpecies:
-            selectedHists[int(pid-1)].SetBinContent(b,hist[b])
+    dim = hypothesis.GetDimension()
+    if dim < 2:
+        print("Hypothesis class:", hypothesis.ClassName())
+        print(f"Expected 2D histogram, got {dim}D")
+        return None
+        raise ValueError(f"Expected 2D histogram, got {dim}D")
+        for b in range(len(hypothesis)):
+            pid = hypothesis[b]
+            if 0 < pid <= nSpecies:
+                selectedHists[int(pid-1)].SetBinContent(b,hist[b])
+    else:
+        return None
+        # 2D bin loop (only real fix)
+        for ix in range(1, hypothesis.GetNbinsX() + 1):
+            for iy in range(1, hypothesis.GetNbinsY() + 1):
+
+                pid = int(hypothesis.GetBinContent(ix, iy))
+
+                if 0 < pid <= nSpecies:
+                    value = hist.GetBinContent(ix, iy)
+                    selectedHists[pid - 1].SetBinContent(ix, iy, value)
     if rebin > 1:
         for h in selectedHists : h.RebinX(rebin)        
     profiles = [copy(selectedHist.ProfileX()) for selectedHist in selectedHists]
