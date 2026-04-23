@@ -5,6 +5,23 @@ import time
 from array import array
 import ROOT
 
+# Force python to flush output immediately (important for real-time logging in batch jobs)
+sys.stdout.reconfigure(line_buffering=True)
+
+# Load C++ macros once at startup
+def loadMacros(dead_channel_maps=False):
+    CODEDIR = os.environ['TPCQCVIS_DIR']
+
+    # where bethe-bloch macro is located
+    bb_macro = os.path.join(CODEDIR, "TPCQCVis/macro/getBetheBloch.C")
+    # Use ROOT C++ macro function to retrieve Bethe-Bloch parameters
+    ROOT.gROOT.ProcessLine(f'.L {bb_macro}+')
+
+    # Only load the dead channel map macro if requested (it takes too long to fetch)
+    if dead_channel_maps:
+        dcm_macro = os.path.join(CODEDIR, "TPCQCVis/macro/drawDeadChannelMap.C")
+        ROOT.gROOT.ProcessLine(f'.L {dcm_macro}+')
+
 def getRunList(remote_dir):
     directories = subprocess.run(["alien_ls", remote_dir], capture_output=True)
     # Remove unnecessary characters and split the string into individual elements
@@ -15,12 +32,8 @@ def getRunList(remote_dir):
     return runList
 
 def getBetheBlochParams(runNumber):
-    # Change to the directory containing getBetheBloch.C
-    CODEDIR = os.environ['TPCQCVIS_DIR']
-    macro_path = os.path.join(CODEDIR, "TPCQCVis/macro/getBetheBloch.C") # where bethe-bloch macro is located
 
-    # Use ROOT C++ macro function to retrieve Bethe-Bloch parameters
-    ROOT.gROOT.ProcessLine(f'.L {macro_path}+')
+    # # Use ROOT C++ macro function to retrieve Bethe-Bloch parameters
     from ROOT import getBetheBloch
 
     # Convert float array to double array
@@ -29,7 +42,41 @@ def getBetheBlochParams(runNumber):
 
     return bbParams
 
-def downloadFiles(local_dir, remote_dir, production, runList):
+def writeBetheBloch(root_file, run, bb_params):
+    """Write Bethe-Bloch TTree into an already-open ROOT file."""
+    bethe_bloch_tree = ROOT.TTree("BetheBlochParameters", "Tree with Bethe-Bloch fit parameters")
+    branches = []
+    for i in range(len(bb_params)):
+        bb_param = array('d', [bb_params[i]])
+        branches.append(bb_param)
+        branch_name = f"BB_Parameter{i}"
+        bethe_bloch_tree.Branch(branch_name, bb_param, f"{branch_name}/D")
+    root_file.cd()
+    bethe_bloch_tree.Fill()
+    bethe_bloch_tree.Write("", ROOT.TObject.kOverwrite)
+
+def writeDeadChannelMaps(root_file, run, binMinutes=5, maxEntries=-1):
+    """Create DeadChannelMaps TDirectory and fill it via the C++ macro."""
+    from ROOT import drawDeadChannelMap
+
+    # Avoid duplicate directory if script is re-run on same file
+    if root_file.GetDirectory("DeadChannelMaps"):
+        print(f"  DeadChannelMaps already present for run {run}, skipping")
+        return
+
+    # Create the subdirectory inside the open ROOT file
+    dcm_dir = root_file.mkdir("DeadChannelMaps")
+
+    try:
+        # Call the C++ function, passing the TDirectory* so it writes there directly
+        drawDeadChannelMap(run, binMinutes, maxEntries, dcm_dir)
+        print(f"  Dead channel maps written for run {run}")
+    except Exception as e:
+        print(f"  WARNING: Dead channel map failed for run {run}: {e}")
+        # Remove the empty directory to keep the file clean
+        root_file.rmdir("DeadChannelMaps")
+
+def downloadFiles(local_dir, remote_dir, production, runList, dead_channel_maps=False):
     from TPCQCVis.src.utility import downloadAttempts
 
     for run in runList:
@@ -47,29 +94,16 @@ def downloadFiles(local_dir, remote_dir, production, runList):
             root_file = ROOT.TFile(f"{local_dir}{run}.root", "UPDATE")
             if root_file.IsZombie():
                 print(f"Error opening {local_dir}{run}.root")
-            
-            # Create the BetheBlochParams TTree
-            bethe_bloch_tree = root_file.TTree("BetheBlochParameters", "Tree with Bethe-Bloch fit parameters")
 
-            # Get Bethe-Bloch parameters
+            # Get Bethe-Bloch parameters and write TTree
             bb_params = getBetheBlochParams(int(run))
+            writeBetheBloch(root_file, run, bb_params)
 
-            # Create branches in the TTree for each Bethe-Bloch parameter
-            branches = []
-            for i in range(len(bb_params)):
-                bb_param = array('d', [bb_params[i]])
-                branches.append(bb_param)
-                branch_name = f"BB_Parameter{i}"
-                bethe_bloch_tree.Branch(branch_name, bb_param, f"{branch_name}/D")
-
-            # Set the current directory to the one associated with root_file
-            root_file.cd()
-            
-            # Fill the tree with the parameters
-            bethe_bloch_tree.Fill()
+            # Create DeadChannelMaps directory and fill histograms (only if flag is set)
+            if dead_channel_maps:
+                writeDeadChannelMaps(root_file, int(run))
 
             # Write and close the ROOT file
-            bethe_bloch_tree.Write("", ROOT.TObject.kOverwrite)
             root_file.Close()
 
         else:
@@ -83,29 +117,16 @@ def downloadFiles(local_dir, remote_dir, production, runList):
                 root_file = ROOT.TFile(f"{local_dir}{run}.root", "UPDATE")
                 if root_file.IsZombie():
                     print(f"Error opening {local_dir}{run}.root")
-                
-                # Create the BetheBlochParams TTree
-                bethe_bloch_tree = ROOT.TTree("BetheBlochParameters", "Tree with Bethe-Bloch fit parameters")
 
-                # Get Bethe-Bloch parameters
+                # Get Bethe-Bloch parameters and write TTree
                 bb_params = getBetheBlochParams(int(run))
+                writeBetheBloch(root_file, run, bb_params)
 
-                # Create branches in the TTree for each Bethe-Bloch parameter
-                branches = []
-                for i in range(len(bb_params)):
-                    bb_param = array('d', [bb_params[i]])
-                    branches.append(bb_param)
-                    branch_name = f"BB_Parameter{i}"
-                    bethe_bloch_tree.Branch(branch_name, bb_param, f"{branch_name}/D")
-
-                # Set the current directory to the one associated with root_file
-                root_file.cd()
-
-                # Fill the tree with the parameters
-                bethe_bloch_tree.Fill()
+                # Create DeadChannelMaps directory and fill histograms (only if flag is set)
+                if dead_channel_maps:
+                    writeDeadChannelMaps(root_file, int(run))
 
                 # Write and close the ROOT file
-                bethe_bloch_tree.Write("", ROOT.TObject.kOverwrite)
                 root_file.Close()
 
                 if False:
@@ -127,18 +148,26 @@ args = sys.argv[1:]
 # Check if the correct number of arguments is provided
 if len(args) < 3:
     print("Insufficient number of arguments provided.")
-    print("Usage: python downloadFromAlien.py local_dir remote_dir production [runList]")
+    print("Usage: python downloadFromAlien.py local_dir remote_dir production [runList] [--dead_channel_maps]")
     sys.exit(1)
 
 # Assign the command-line arguments to variables
 local_dir = args[0]
 remote_dir = args[1]
 production = args[2]
-runList = args[3:] if len(args) > 3 else None
+
+# Parse optional --dead_channel_maps flag and run list from remaining args
+dead_channel_maps = "--dead_channel_maps" in args or "-dcm" in args
+remaining = [a for a in args[3:] if a not in ("--dead_channel_maps", "-dcm")]
+runList = remaining if remaining else None
 
 # If runList is not provided, obtain it dynamically
 if runList is None:
     runList = getRunList(remote_dir)
 
+# Load C++ macros once at startup
+# Only load the dead channel map macro if the flag is set (saves compile time)
+loadMacros(dead_channel_maps)
+
 # Download files
-downloadFiles(local_dir, remote_dir, production, runList)
+downloadFiles(local_dir, remote_dir, production, runList, dead_channel_maps)

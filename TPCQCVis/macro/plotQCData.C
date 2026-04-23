@@ -14,6 +14,7 @@
 #include "QualityControl/MonitorObject.h"
 #include "CommonUtils/StringUtils.h"
 #include "TTree.h"
+#include "TKey.h"
 #endif
 
 /// This can read a file containing Clusters, PID and Tracks
@@ -278,7 +279,22 @@ void plotQCData(const std::string filename)
       TTree* clonedTree = betheTree->CloneTree();
       clonedTree->Write();
   }
-
+//-------------------------------------------------
+  // Dead Channel Maps
+  TDirectory* dcmDir = (TDirectory*)f->Get("DeadChannelMaps");
+  if (dcmDir) {
+    fout->cd();
+    TDirectory* dcmDirOut = fout->mkdir("DeadChannelMaps");
+    dcmDirOut->cd();
+    TIter next(dcmDir->GetListOfKeys());
+    TKey* key;
+    while ((key = (TKey*)next())) {
+      TObject* obj = key->ReadObj();
+      obj->Write("", TObject::kOverwrite);
+      delete obj;
+    }
+    std::cout << "Dead channel maps copied to QC file" << std::endl;
+  }
 //-------------------------------------------------
   fout->Close();
   return;
