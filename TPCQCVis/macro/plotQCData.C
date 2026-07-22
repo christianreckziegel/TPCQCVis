@@ -15,6 +15,8 @@
 #include "CommonUtils/StringUtils.h"
 #include "TTree.h"
 #include "TKey.h"
+#include "TSystem.h"
+#include "TROOT.h"
 #endif
 
 /// This can read a file containing Clusters, PID and Tracks
@@ -294,6 +296,41 @@ void plotQCData(const std::string filename)
       delete obj;
     }
     std::cout << "Dead channel maps copied to QC file" << std::endl;
+  }
+//-------------------------------------------------
+  // Time series plots (if available)
+  TString tsFileName = filename;
+  tsFileName.ReplaceAll(".root", "_TimeSeries.root"); // Adjust if your manual naming is different
+
+  if (!gSystem->AccessPathName(tsFileName)) {
+    std::cout << "Found TimeSeries file: " << tsFileName << std::endl;
+    TFile *tsFile = TFile::Open(tsFileName, "READ");
+    if (tsFile && !tsFile->IsZombie()) {
+      fout->mkdir("TimeSeries");
+      fout->cd("TimeSeries");
+      
+      TIter next(tsFile->GetListOfKeys());
+      TKey *key;
+      while ((key = (TKey*)next())) {
+        // 1. Check if we can get the class
+        const char* className = key->GetClassName();
+        TClass *cl = gROOT->GetClass(className);
+        if (!cl) continue; 
+
+        // 2. Only process Canvases
+        if (cl->InheritsFrom("TCanvas")) {
+          TObject *obj = key->ReadObj();
+          // 3. Check if object was successfully read
+          if (obj) {
+            obj->Write(key->GetName(), TObject::kOverwrite);
+            delete obj;
+          }
+        }
+      }
+      tsFile->Close();
+    }
+  } else {
+    std::cout << "No TimeSeries file found for " << filename << std::endl;
   }
 //-------------------------------------------------
   fout->Close();

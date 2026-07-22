@@ -30,6 +30,9 @@
 #include "TDirectory.h"
 #include "TFile.h"
 #include "TObjArray.h"
+#include <TStopwatch.h>
+#include <TROOT.h> // for gROOT
+#include <TLatex.h>
 
 // RapidJSON
 #include "rapidjson/document.h"
@@ -54,8 +57,13 @@ std::string formatTime(long long ms)
 }
 
 // Accept an optional output TDirectory
-void drawDeadChannelMap(int run, int binMinutes = 5, int maxEntries = -1, TDirectory* outDir = nullptr) {
+void drawDeadChannelMap(int run, int binMinutes = 20, int maxEntries = -1, TDirectory* outDir = nullptr) {
+  // Time how much it takes to run
+  TStopwatch timer;
+  timer.Start();
+
   TH1::AddDirectory(false);
+  gROOT->SetBatch(true);
 
   // ── 1. CCDB setup ──────────────────────────────────────────────────────────
   o2::ccdb::CcdbApi api;
@@ -83,9 +91,7 @@ void drawDeadChannelMap(int run, int binMinutes = 5, int maxEntries = -1, TDirec
     return a["validFrom"].GetInt64() < b["validFrom"].GetInt64();
   });
 
-  const int nEntries = (maxEntries > 0)
-    ? std::min(maxEntries, (int)entries.Size())
-    : (int)entries.Size();
+  const int nEntries = (maxEntries > 0) ? std::min(maxEntries, (int)entries.Size()) : (int)entries.Size();
 
   // ── 2. Run time boundaries ─────────────────────────────────────────────────
   const long long tStart = entries[0]["validFrom"].GetInt64();
@@ -102,8 +108,7 @@ void drawDeadChannelMap(int run, int binMinutes = 5, int maxEntries = -1, TDirec
   const long long binMs    = binMinutes * 60LL * 1000LL; // ms per time bin
   const int nBinsPerHour   = (int)std::ceil(3600000.0 / binMs); // e.g. 12 for 5 min
 
-  LOGP(info, "Hourly canvases: {}, bins per hour: {} ({} min each)",
-       nCanvases, nBinsPerHour, binMinutes);
+  LOGP(info, "Hourly canvases: {}, bins per hour: {} ({} min each)", nCanvases, nBinsPerHour, binMinutes);
 
   // ── 4. DeadChannelMapCreator ───────────────────────────────────────────────
   DeadChannelMapCreator deadChannelMapCreator;
@@ -117,18 +122,38 @@ void drawDeadChannelMap(int run, int binMinutes = 5, int maxEntries = -1, TDirec
   const int nStacks = 144; // 36 IROC + 36*3 OROC sub-regions
 
   // ── 5. Pre-load dead channel counts per snapshot per stack ─────────────────
-  // deadCounts[iSnapshot][iStack] = number of dead channels
-  LOGP(info, "Pre-loading {} snapshots from CCDB...", nEntries);
-  std::vector<std::vector<float>> deadCounts(nEntries, std::vector<float>(nStacks, 0.f));
-  std::vector<long long> snapStart(nEntries), snapEnd(nEntries);
+  // Sample one snapshot every samplingMinutes to speed up fetching.
+  // binMinutes is set to samplingMinutes by default (see function signature)
+  // so that display resolution matches data resolution.
+  double samplingMinutes = binMinutes;
+  const long long samplingMs = samplingMinutes * 60LL * 1000LL; // ms
+  const bool doSampling = samplingMinutes > 0;
 
+  // Build sampled index list
+  std::vector<int> sampledIndices;
+  long long lastSampledTime = doSampling ? -samplingMs : LLONG_MIN;
   for (int i = 0; i < nEntries; ++i) {
-    const auto& entry = entries[i];
+    const long long t = (entries[i]["validFrom"].GetInt64() + entries[i]["validUntil"].GetInt64()) / 2;
+    if (!doSampling || t - lastSampledTime >= samplingMs) {
+      sampledIndices.push_back(i);
+      lastSampledTime = t;
+    }
+  }
+  const int nSampled = sampledIndices.size();
+  LOGP(info, "Sampling {} out of {} snapshots (every {} min)", nSampled, nEntries, samplingMinutes);
+
+  // deadCounts[iSampled][iStack] = number of dead channels
+  std::vector<std::vector<float>> deadCounts(nSampled, std::vector<float>(nStacks, 0.f));
+  std::vector<long long> snapStart(nSampled), snapEnd(nSampled);
+
+  for (int i = 0; i < nSampled; ++i) {
+    const int iEntry = sampledIndices[i];
+    const auto& entry = entries[iEntry];
     snapStart[i] = entry["validFrom"].GetInt64();
     snapEnd[i]   = entry["validUntil"].GetInt64();
     const long long mid = (snapStart[i] + snapEnd[i]) / 2;
 
-    deadChannelMapCreator.load(mid);
+    deadChannelMapCreator.load(mid); // very time consuming CCDB data fetch
     auto& map = deadChannelMapCreator.getDeadChannelMap();
 
     for (size_t iRoc = 0; iRoc < map.getData().size(); ++iRoc) {
@@ -136,21 +161,19 @@ void drawDeadChannelMap(int run, int binMinutes = 5, int maxEntries = -1, TDirec
       auto& data = roc.getData();
       if (iRoc < 36) {
         // IROC: one stack per ROC
-        deadCounts[i][iRoc] = roc.getSum<float>();
+        deadCounts[i][iRoc] = roc.getSum<float>(); // total dead pads in this IROC
       } else {
         // OROC: split into 3 sub-stacks
         const int base = 36 + (iRoc - 36) * 3; // base stack index for this OROC
-        deadCounts[i][base + 0] = std::accumulate(data.begin(),
-                                    data.begin() + pads[0], 0.f);
-        deadCounts[i][base + 1] = std::accumulate(data.begin() + pads[0],
-                                    data.begin() + pads[0] + pads[1], 0.f);
-        deadCounts[i][base + 2] = std::accumulate(data.begin() + pads[0] + pads[1],
-                                    data.end(), 0.f);
+        deadCounts[i][base + 0] = std::accumulate(data.begin(), data.begin() + pads[0], 0.f);                     // OROC1 region dead pads
+        deadCounts[i][base + 1] = std::accumulate(data.begin() + pads[0], data.begin() + pads[0] + pads[1], 0.f); // OROC2 region dead pads
+        deadCounts[i][base + 2] = std::accumulate(data.begin() + pads[0] + pads[1], data.end(), 0.f);             // OROC3 region dead pads
       }
     }
 
-    if (i % 10 == 0)
-      LOGP(info, "  Loaded snapshot {}/{}", i, nEntries);
+    // Print every snapshot
+    if (i % 1 == 0)
+      LOGP(info, "  Loaded sampled snapshot {}/{} (entry {}/{})", i, nSampled, iEntry, nEntries);
   }
 
   // ── 6. Build one TH2F per hourly canvas ────────────────────────────────────
@@ -161,24 +184,24 @@ void drawDeadChannelMap(int run, int binMinutes = 5, int maxEntries = -1, TDirec
     const long long hourEnd   = std::min(hourStart + oneHour, tEnd);
 
     // Actual number of bins this hour (last hour may be shorter)
-    const int nBinsThisHour = (int)std::ceil(
-      double(hourEnd - hourStart) / double(binMs));
+    const int nBinsThisHour = (int)std::ceil(double(hourEnd - hourStart) / double(binMs));
 
-    auto* h = new TH2F(
+    auto* histogram = new TH2F(
       fmt::format("hDeadChannels_run{}_hour{}", run, iHour).data(),
-      fmt::format("Dead Channels | Run {} | Hour {} ({} - {});Time bin ({} min);Stack;#Dead Channels",
+      fmt::format("Dead Channels | Run {} | Hour {} ({} - {});Time bin ({} min);Stack (0-35: IROCs, 36-71: OROC1, 72-107: OROC2, 108-143: OROC3);#Dead Channels",
         run, iHour, formatTime(hourStart), formatTime(hourEnd), binMinutes).data(),
       nBinsThisHour, 0, nBinsThisHour,
       nStacks, 0, nStacks
     );
-    h->SetStats(false);
+    histogram->SetStats(false);
 
     // Fill: loop over time bins, then snapshots, compute weighted overlap
     for (int iBin = 0; iBin < nBinsThisHour; ++iBin) {
       const long long binStart = hourStart + iBin * binMs;
       const long long binEnd   = std::min(binStart + binMs, tEnd);
 
-      for (int iSnap = 0; iSnap < nEntries; ++iSnap) {
+      // How many snapshots fall within the current bin
+      for (int iSnap = 0; iSnap < nSampled; ++iSnap) {
         // Skip snapshots that don't overlap this bin
         if (snapStart[iSnap] >= binEnd || snapEnd[iSnap] <= binStart) continue;
 
@@ -186,26 +209,28 @@ void drawDeadChannelMap(int run, int binMinutes = 5, int maxEntries = -1, TDirec
         const long long overlapEnd   = std::min(snapEnd[iSnap],   binEnd);
         if (overlapStart >= overlapEnd) continue;
 
-        const double overlapFrac =
-          double(overlapEnd - overlapStart) / double(snapEnd[iSnap] - snapStart[iSnap]);
+        // What fraction of overlaping of the snapshot fall within the time bin
+        const double overlapFrac = double(overlapEnd - overlapStart) / double(snapEnd[iSnap] - snapStart[iSnap]);
 
+        // The fraction is used for all stack
         for (int iStack = 0; iStack < nStacks; ++iStack) {
           if (deadCounts[iSnap][iStack] > 0.f) {
-            h->Fill(iBin + 0.5, iStack + 0.5, overlapFrac * deadCounts[iSnap][iStack]);
+            histogram->Fill(iBin + 0.5, iStack + 0.5, overlapFrac * deadCounts[iSnap][iStack]);
           }
         }
       }
     }
 
     // Draw
-    auto* c = new TCanvas(
+    auto* canvas = new TCanvas(
       fmt::format("cHour{}_run{}", iHour, run).data(),
       fmt::format("Dead Channel Map | Run {} | Hour {}", run, iHour).data(),
       1400, 600
     );
-    c->cd();
-    h->Draw("COLZ");
-    arrCanvases.Add(c);
+    canvas->cd();
+    histogram->Draw("COLZ");
+    histogram->GetYaxis()->SetTitleY(0.55);  // Shift up
+    arrCanvases.Add(canvas);
 
     LOGP(info, "Canvas {} done: {} - {}", iHour, formatTime(hourStart), formatTime(hourEnd));
   }
@@ -215,11 +240,11 @@ void drawDeadChannelMap(int run, int binMinutes = 5, int maxEntries = -1, TDirec
     // Write into the provided directory (e.g. inside the QC file)
     outDir->cd();
     for (int iHour = 0; iHour < arrCanvases.GetEntries(); ++iHour) {
-      auto* c = (TCanvas*)arrCanvases.At(iHour);
-      auto* h = (TH2F*)c->GetPrimitive(
+      auto* canvas = (TCanvas*)arrCanvases.At(iHour);
+      auto* histogram = (TH2F*)canvas->GetPrimitive(
         fmt::format("hDeadChannels_run{}_hour{}", run, iHour).data());
-      if (h) h->Write();
-      c->Write();
+      if (histogram) histogram->Write();
+      canvas->Write();
     }
     LOGP(info, "Written DeadChannelMaps into provided TDirectory");
   } else {
@@ -231,13 +256,16 @@ void drawDeadChannelMap(int run, int binMinutes = 5, int maxEntries = -1, TDirec
     TDirectory* dir = outFile->mkdir("DeadChannelMaps");
     dir->cd();
     for (int iHour = 0; iHour < arrCanvases.GetEntries(); ++iHour) {
-      auto* c = (TCanvas*)arrCanvases.At(iHour);
-      auto* h = (TH2F*)c->GetPrimitive(
-        fmt::format("hDeadChannels_run{}_hour{}", run, iHour).data());
-      if (h) h->Write();
-      c->Write();
+      auto* canvas = (TCanvas*)arrCanvases.At(iHour);
+      auto* histogram = (TH2F*)canvas->GetPrimitive(fmt::format("hDeadChannels_run{}_hour{}", run, iHour).data());
+      if (histogram) histogram->Write();
+      canvas->Write();
     }
     outFile->Close();
     LOGP(info, "Done. Output: DeadChannelMap_hourly_run{}.root", run);
   }
+
+  // Stop timing and print
+  timer.Stop();
+  std::cout << "Dead map channels creation took: " << timer.RealTime() / 60. << " minutes for run " << run << std::endl;
 }

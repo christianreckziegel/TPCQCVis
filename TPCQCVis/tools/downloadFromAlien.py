@@ -55,7 +55,7 @@ def writeBetheBloch(root_file, run, bb_params):
     bethe_bloch_tree.Fill()
     bethe_bloch_tree.Write("", ROOT.TObject.kOverwrite)
 
-def writeDeadChannelMaps(root_file, run, binMinutes=5, maxEntries=-1):
+def writeDeadChannelMaps(root_file, run, binMinutes=10, maxEntries=-1):
     """Create DeadChannelMaps TDirectory and fill it via the C++ macro."""
     from ROOT import drawDeadChannelMap
 
@@ -157,8 +157,8 @@ remote_dir = args[1]
 production = args[2]
 
 # Parse optional --dead_channel_maps flag and run list from remaining args
-dead_channel_maps = "--dead_channel_maps" in args or "-dcm" in args
-remaining = [a for a in args[3:] if a not in ("--dead_channel_maps", "-dcm")]
+dead_channel_maps = "--dead-channel-maps" in args or "-dcm" in args
+remaining = [a for a in args[3:] if a not in ("--dead-channel-maps", "-dcm")]
 runList = remaining if remaining else None
 
 # If runList is not provided, obtain it dynamically
